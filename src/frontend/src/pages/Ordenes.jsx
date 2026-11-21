@@ -1,0 +1,320 @@
+import * as React from 'react'
+import {
+  Box, Paper, Typography, Stack, Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, Snackbar, Alert, CircularProgress
+} from '@mui/material'
+import { DatePicker } from '@mui/x-date-pickers/DatePicker'
+import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs'
+import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider'
+import dayjs from 'dayjs'
+import { API_BASE_URL } from '../config/api'
+import { useAuth } from '../context/AuthContext'
+import { formatFecha } from '../utils/format'
+
+// --- Datos de ejemplo (luego los reemplazas por tu API/DB) ---
+
+// Utilidades de totales
+const getItemPrice = (item) => {
+  const raw =
+    item?.precio ??
+    item?.price ??
+    item?.precio_unitario ??
+    item?.producto?.precio_minorista ??
+    item?.producto?.precio_cf ??
+    item?.producto?.precio_mayorista ??
+    0
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : 0
+}
+
+const getItemCost = (item) => {
+  const raw = item?.costo_unitario ?? item?.costo ?? item?.producto?.costo ?? 0
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : 0
+}
+
+const getItemQty = (item) => {
+  const raw = item?.qty ?? item?.cantidad ?? 1
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : 0
+}
+
+const normalizeNumber = (value) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : 0
+}
+
+const getOrdenDescuento = (orden) => normalizeNumber(orden?.descuento ?? orden?.discount ?? 0)
+const calcSubtotal = (items = []) =>
+  items.reduce((s, it) => s + getItemPrice(it) * getItemQty(it), 0)
+const calcCostoTotal = (items = []) =>
+  items.reduce((s, it) => s + getItemCost(it) * getItemQty(it), 0)
+
+// Util: calcular total (restando el descuento de la orden si existe)
+function calcTotal(items = [], descuento = 0) {
+  const subtotal = calcSubtotal(items)
+  const desc = Math.max(normalizeNumber(descuento), 0)
+  const neto = subtotal - desc
+  return neto < 0 ? 0 : neto
+}
+
+// Util: calcular ganancia de una lista de items
+function calcGanancia(items = [], descuento = 0) {
+  const subtotal = calcSubtotal(items)
+  const costoTotal = calcCostoTotal(items)
+  const desc = Math.max(normalizeNumber(descuento), 0)
+  return subtotal - costoTotal - desc
+}
+
+export default function Pedidos2() {
+  const { user, isAdmin, hasAnyPermiso } = useAuth()
+  const [ordenes, setOrdenes] = React.useState([])
+  const [productosById, setProductosById] = React.useState({})
+  const [clientesById, setClientesById] = React.useState({})
+  const [estadosOrden, setEstadosOrden] = React.useState([])
+  const [rangeFrom, setRangeFrom] = React.useState(dayjs().startOf('month'))
+  const [rangeTo, setRangeTo] = React.useState(dayjs().endOf('day'))
+  const [cargando, setCargando] = React.useState(false)
+  const [snack, setSnack] = React.useState({ open: false, message: '', severity: 'error' })
+
+  const mostrarAviso = (message, severity = 'error') =>
+    setSnack({ open: true, message, severity })
+  const cerrarAviso = (_, reason) => {
+    if (reason === 'clickaway') return
+    setSnack((prev) => ({ ...prev, open: false }))
+  }
+
+  const filtered = React.useMemo(() => {
+    const canSeeAll = isAdmin || hasAnyPermiso(['Maestro', 'Produccion'])
+    const estadoPedido = estadosOrden.find(
+      (estado) => String(estado?.nombre || '').toLowerCase() === 'confirmado'
+    )
+    let result = ordenes
+    if (estadoPedido?.id) {
+      result = result.filter(
+        (orden) => String(orden?.estado_id) === String(estadoPedido.id)
+      )
+    }
+    if (!canSeeAll && user?.id != null) {
+      result = result.filter((orden) => {
+        const clienteInfo = orden?.cliente ?? clientesById[orden?.cliente_id]
+        if (!clienteInfo) return false
+        return String(clienteInfo?.usuario_id) === String(user.id)
+      })
+    }
+    return result
+  }, [ordenes, estadosOrden, clientesById, user?.id, isAdmin, hasAnyPermiso])
+
+
+  // 🔹 GET /ordenes?inicio=...&fin=...
+  const cargarOrdenes = async (inicioIso, finIso) => {
+    try {
+      setCargando(true)
+      const params = new URLSearchParams()
+      if (inicioIso) params.append('inicio', inicioIso)
+      if (finIso)    params.append('fin',    finIso)
+
+      const res = await fetch(`${API_BASE_URL}/ordenes?${params.toString()}`)
+      if (!res.ok) throw new Error('Error al obtener órdenes')
+
+      const data = await res.json()
+      setOrdenes(data)   // array de ordenes desde el back
+    } catch (err) {
+      console.error(err)
+      mostrarAviso('No se pudieron cargar las órdenes. Inténtalo de nuevo.')
+    } finally {
+      setCargando(false)
+    }
+  }
+
+  const cargarProductos = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/productos`)
+      if (!res.ok) throw new Error('Error al obtener productos')
+      const data = await res.json()
+      const map = {}
+      for (const producto of data || []) {
+        if (producto?.id != null) {
+          map[producto.id] = producto
+        }
+      }
+      setProductosById(map)
+    } catch (err) {
+      console.error(err)
+      mostrarAviso('No se pudo cargar la lista de productos.')
+    }
+  }
+
+  const cargarClientes = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/clientes`)
+      if (!res.ok) throw new Error('Error al obtener clientes')
+      const data = await res.json()
+      const map = {}
+      for (const cliente of data || []) {
+        if (cliente?.id != null) {
+          map[cliente.id] = cliente
+        }
+      }
+      setClientesById(map)
+    } catch (err) {
+      console.error(err)
+      mostrarAviso('No se pudo cargar la lista de clientes.')
+    }
+  }
+
+  const cargarEstadosOrden = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/estados_orden`)
+      if (!res.ok) throw new Error('Error al obtener estados de orden')
+      const data = await res.json()
+      setEstadosOrden(data || [])
+    } catch (err) {
+      console.error(err)
+      mostrarAviso('No se pudieron cargar los estados de las órdenes.')
+    }
+  }
+
+  const totalPeriodo = filtered.reduce(
+    (acc, o) => acc + calcTotal(o.items || [], getOrdenDescuento(o)),
+    0
+  )
+
+  const gananciaPeriodo = filtered.reduce(
+    (acc, o) => acc + calcGanancia(o.items || [], getOrdenDescuento(o)),
+    0
+  )
+
+  const [porcentajeComision, setPorcentajeComision] = React.useState(0);
+
+  const totalComision = React.useMemo(
+    () => (porcentajeComision ? (totalPeriodo * porcentajeComision) / 100 : 0),
+    [totalPeriodo, porcentajeComision]
+  )
+
+  // 🔹 Cada vez que cambia el rango, pedir órdenes al backend
+  React.useEffect(() => {
+    if (!rangeFrom || !rangeTo || !rangeFrom.isValid() || !rangeTo.isValid()) return
+
+    const inicioIso = rangeFrom.startOf('day').toDate().toISOString()
+    const finIso    = rangeTo.endOf('day').toDate().toISOString()
+
+    cargarOrdenes(inicioIso, finIso)
+  }, [rangeFrom, rangeTo])
+
+  React.useEffect(() => {
+    cargarProductos()
+    cargarClientes()
+    cargarEstadosOrden()
+  }, [])
+
+  return (
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
+      <Box sx={{ maxWidth: 1100, mx: 'auto', mt: 3 }}>
+        <Typography variant="h5" sx={{ mb: 2, fontWeight: 600 }}>
+          Ordenes
+        </Typography>
+
+        
+        <Paper sx={{ p: 2, borderRadius: 3, mb: 2 }}>
+          {/* Fila original: rango de fechas + total período */}
+          <Stack
+            direction={{ xs: 'column', sm: 'row' }}
+            spacing={2}
+            alignItems="center"
+          >
+            <DatePicker
+              label="Desde"
+              value={rangeFrom}
+              onChange={(newVal) => setRangeFrom(newVal)}
+              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+            />
+            <DatePicker
+              label="Hasta"
+              value={rangeTo}
+              onChange={(newVal) => setRangeTo(newVal)}
+              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+            />
+
+            {/* <Chip
+              label={`Total en el período: Q ${totalPeriodo.toFixed(2)}`}
+              color="primary"
+              sx={{ fontWeight: 600 }}
+            /> */}
+          </Stack>
+
+          
+        </Paper>
+
+        <TableContainer component={Paper} sx={{ borderRadius: 3 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Fecha</TableCell>
+                <TableCell>No. Orden</TableCell>
+                <TableCell>Cliente</TableCell>
+                <TableCell>Producto</TableCell>
+                <TableCell align="right">Cantidad</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {filtered.flatMap((o) => {
+                const clienteInfo = o.cliente ?? clientesById[o.cliente_id]
+                const items = o.items || []
+                if (items.length === 0) {
+                  return (
+                    <TableRow key={`${o.id}-empty`} hover>
+                      <TableCell>{formatFecha(o.fecha)}</TableCell>
+                      <TableCell>{o.codigo_orden || o.codigo || o.id}</TableCell>
+                      <TableCell>{clienteInfo?.nombre || '-'}</TableCell>
+                      <TableCell>-</TableCell>
+                      <TableCell align="right">0</TableCell>
+                    </TableRow>
+                  )
+                }
+
+                return items.map((item, idx) => {
+                  const productoInfo = item?.producto ?? productosById[item?.producto_id]
+                  const sku = productoInfo?.codigo || item?.codigo || item?.sku || '-'
+                  const cantidad = item?.cantidad ?? item?.qty ?? 0
+                  const isFirst = idx === 0
+
+                  return (
+                    <TableRow key={`${o.id}-${item?.id ?? sku}-${idx}`} hover>
+                      {isFirst && (
+                        <>
+                          <TableCell rowSpan={items.length} sx={{ verticalAlign: 'middle' }}>
+                            {formatFecha(o.fecha)}
+                          </TableCell>
+                          <TableCell rowSpan={items.length} sx={{ verticalAlign: 'middle' }}>
+                            {o.codigo_orden || o.codigo || o.id}
+                          </TableCell>
+                          <TableCell rowSpan={items.length} sx={{ verticalAlign: 'middle' }}>
+                            {clienteInfo?.nombre || '-'}
+                          </TableCell>
+                        </>
+                      )}
+                      <TableCell>{sku}</TableCell>
+                      <TableCell align="right">{cantidad}</TableCell>
+                    </TableRow>
+                  )
+                })
+              })}
+              {filtered.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Typography color="text.secondary" align="center">
+                      No hay ventas en el rango seleccionado
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+
+          </Table>
+        </TableContainer>
+
+      </Box>
+    </LocalizationProvider>
+  )
+}

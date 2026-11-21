@@ -1,0 +1,54 @@
+import * as React from 'react'
+import { Grid, Typography } from '@mui/material'
+import AreaChartIcon from '@mui/icons-material/AreaChart'
+import ModuleCard from '../components/ModuleCard'
+import PointOfSaleIcon from '@mui/icons-material/PointOfSale'
+import ProductionQuantityLimitsIcon from '@mui/icons-material/ProductionQuantityLimits'
+import PortraitIcon from '@mui/icons-material/Portrait'
+import InventoryIcon from '@mui/icons-material/Inventory2'
+import AssignmentIcon from '@mui/icons-material/Assignment'
+import WarehouseIcon from '@mui/icons-material/Warehouse'
+import AccountBalanceIcon from '@mui/icons-material/AccountBalance'
+import PaymentsIcon from '@mui/icons-material/Payments'
+import PrecisionManufacturingIcon from '@mui/icons-material/PrecisionManufacturing'
+import { useAuth } from '../context/AuthContext'
+
+const modules = [
+  { to: '/COPRODA/ventas', permiso: 'Ventas', title: 'Ventas', icon: PointOfSaleIcon, subtitle: 'Módulo de ventas y pedidos rápidos' },
+  { to: '/COPRODA/reportes', permiso: 'Reportes', title: 'Reportes', icon: AreaChartIcon, subtitle: 'Reportes de ventas y desempeño' },
+  { to: '/COPRODA/compras', permiso: 'Compras', altPermisos: ['Productos'], title: 'Compras', icon: ProductionQuantityLimitsIcon, subtitle: 'Compra y carga de productos' },
+  { to: '/COPRODA/pedidos', permiso: 'Pedidos', title: 'Pedidos', icon: AssignmentIcon, subtitle: 'Órdenes generadas y detalle' },
+  { to: '/COPRODA/produccion-dashboard', permiso: 'Produccion', title: 'Producción', icon: PrecisionManufacturingIcon, subtitle: 'Panel de producción y accesos rápidos' },
+  { to: '/COPRODA/bodega', permiso: 'Bodega', title: 'Bodega', icon: WarehouseIcon, subtitle: 'Inventario y stock' },
+  { to: '/COPRODA/clientes', permiso: 'Clientes', altPermisos: ['ClientesVentas', 'ClientesFinanzas'], title: 'Clientes', icon: PortraitIcon, subtitle: 'Historial y abonos por cliente' },
+  { to: '/COPRODA/abonos', permiso: 'Abonos', title: 'Abonos', icon: PaymentsIcon, subtitle: 'Abonos aplicados por cliente' },
+  { to: '/COPRODA/bancos', permiso: 'Bancos', title: 'Bancos', icon: AccountBalanceIcon, subtitle: 'Pagos sin asignar' },
+  { to: '/COPRODA/stocks', permiso: 'maestro', altPermisos: ['Produccion'], title: 'Stocks', icon: InventoryIcon, subtitle: 'Stocks de productos y materias primas' },
+  { to: '/COPRODA', title: 'Inicio', icon: InventoryIcon, subtitle: 'Volver al panel principal' },
+]
+
+export default function Home() {
+  const { hasAnyPermiso } = useAuth()
+  const visibleModules = modules.filter((m) => {
+    if (m.to === '/COPRODA') return true
+    if (!m.permiso && (!m.altPermisos || m.altPermisos.length === 0)) return true
+    const permisos = m.altPermisos ? [m.permiso, ...m.altPermisos] : [m.permiso]
+    return hasAnyPermiso(permisos.filter(Boolean))
+  })
+
+  return (
+    <>
+      <Typography variant="h5" sx={{ mb: 2, fontWeight: 600 }}>
+        ¿Qué necesitas hacer?
+      </Typography>
+
+      <Grid container spacing={2}>
+        {visibleModules.map((m) => (
+          <Grid key={m.to} size={{ xs: 12, sm: 6, md: 4 }}>
+            <ModuleCard {...m} />
+          </Grid>
+        ))}
+      </Grid>
+    </>
+  )
+}

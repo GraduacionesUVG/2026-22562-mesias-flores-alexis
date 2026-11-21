@@ -1,0 +1,935 @@
+import * as React from 'react'
+import {
+  Box, Paper, Typography, Stack, Divider, TextField, Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, Dialog, DialogTitle, DialogContent, DialogActions, Button, Chip, MenuItem, InputAdornment, IconButton,
+  Snackbar, Alert, CircularProgress
+} from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
+import { DatePicker } from '@mui/x-date-pickers/DatePicker'
+import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs'
+import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider'
+import dayjs from 'dayjs'
+import isBetween from 'dayjs/plugin/isBetween'
+import { API_BASE_URL } from '../config/api'
+import logoCoproda from '../assets/image.png'
+import { NumerosALetras } from 'numero-a-letras'
+import { useAuth } from '../context/AuthContext'
+import { useConfirm } from '../components/ConfirmProvider'
+import { formatFecha, formatQuetzales } from '../utils/format'
+dayjs.extend(isBetween)
+
+// --- Datos de ejemplo (luego los reemplazas por tu API/DB) ---
+
+// Utilidades de totales
+const getItemPrice = (item) => {
+  const raw =
+    item?.precio ??
+    item?.price ??
+    item?.precio_unitario ??
+    item?.producto?.precio_minorista ??
+    item?.producto?.precio_cf ??
+    item?.producto?.precio_mayorista ??
+    0
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : 0
+}
+
+const getItemCost = (item) => {
+  const raw = item?.costo_unitario ?? item?.costo ?? item?.producto?.costo ?? 0
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : 0
+}
+
+const getItemQty = (item) => {
+  const raw = item?.qty ?? item?.cantidad ?? 1
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : 0
+}
+
+const normalizeNumber = (value) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : 0
+}
+
+const getOrdenDescuento = (orden) => normalizeNumber(orden?.descuento ?? orden?.discount ?? 0)
+const calcSubtotal = (items = []) =>
+  items.reduce((s, it) => s + getItemPrice(it) * getItemQty(it), 0)
+const calcCostoTotal = (items = []) =>
+  items.reduce((s, it) => s + getItemCost(it) * getItemQty(it), 0)
+const formatTotalEnLetras = (value) => {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  return NumerosALetras(num)
+    .replace('Pesos', 'Quetzales')
+    .replace('Peso', 'Quetzal')
+    .replace('/100 M.N.', '/100')
+}
+
+// Util: calcular total (restando el descuento de la orden si existe)
+function calcTotal(items = [], descuento = 0) {
+  const subtotal = calcSubtotal(items)
+  const desc = Math.max(normalizeNumber(descuento), 0)
+  const neto = subtotal - desc
+  return neto < 0 ? 0 : neto
+}
+
+// Util: calcular ganancia de una lista de items
+function calcGanancia(items = [], descuento = 0) {
+  const subtotal = calcSubtotal(items)
+  const costoTotal = calcCostoTotal(items)
+  const desc = Math.max(normalizeNumber(descuento), 0)
+  return subtotal - costoTotal - desc
+}
+
+export default function Reportes() {
+  const { hasAnyPermiso } = useAuth()
+  const confirm = useConfirm()
+  const puedeEditarBodega = hasAnyPermiso(['BodegaEditar', 'Maestro'])
+  const [ordenSel, setOrdenSel] = React.useState(null)
+  const [ordenes, setOrdenes] = React.useState([])
+  const [productosById, setProductosById] = React.useState({})
+  const [clientesById, setClientesById] = React.useState({})
+  const [tiposPago, setTiposPago] = React.useState([])
+  const [estadosOrden, setEstadosOrden] = React.useState([])
+  const [rangeFrom, setRangeFrom] = React.useState(dayjs().startOf('month'))
+  const [rangeTo, setRangeTo] = React.useState(dayjs().endOf('day'))
+  const [deletingId, setDeletingId] = React.useState(null)
+  const [confirmadas, setConfirmadas] = React.useState({})
+  const [modoEdicion, setModoEdicion] = React.useState(false)
+  const [cantidadesEdit, setCantidadesEdit] = React.useState({})
+  const [splitting, setSplitting] = React.useState(false)
+  const [confirmandoId, setConfirmandoId] = React.useState(null)
+  const [loadingOrdenes, setLoadingOrdenes] = React.useState(false)
+  const [snack, setSnack] = React.useState({ open: false, msg: '', severity: 'success' })
+
+  const filtered = React.useMemo(() => {
+    const estadoPedido = estadosOrden.find(
+      (estado) => String(estado?.nombre || '').toLowerCase() === 'confirmado'
+    )
+    if (!estadoPedido?.id) return ordenes
+    return ordenes.filter(
+      (orden) => String(orden?.estado_id) === String(estadoPedido.id)
+    )
+  }, [ordenes, estadosOrden])
+
+
+  // 🔹 GET /ordenes?inicio=...&fin=...
+  const cargarOrdenes = async (inicioIso, finIso) => {
+    try {
+      setLoadingOrdenes(true)
+      const params = new URLSearchParams()
+      if (inicioIso) params.append('inicio', inicioIso)
+      if (finIso)    params.append('fin',    finIso)
+
+      const res = await fetch(`${API_BASE_URL}/ordenes?${params.toString()}`)
+      if (!res.ok) throw new Error('Error al obtener órdenes')
+
+      const data = await res.json()
+      setOrdenes(data)   // array de ordenes desde el back
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoadingOrdenes(false)
+    }
+  }
+
+  const cargarProductos = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/productos`)
+      if (!res.ok) throw new Error('Error al obtener productos')
+      const data = await res.json()
+      const map = {}
+      for (const producto of data || []) {
+        if (producto?.id != null) {
+          map[producto.id] = producto
+        }
+      }
+      setProductosById(map)
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const cargarClientes = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/clientes`)
+      if (!res.ok) throw new Error('Error al obtener clientes')
+      const data = await res.json()
+      const map = {}
+      for (const cliente of data || []) {
+        if (cliente?.id != null) {
+          map[cliente.id] = cliente
+        }
+      }
+      setClientesById(map)
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const cargarTiposPago = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/tipos_pago`)
+      if (!res.ok) throw new Error('Error al obtener tipos de pago')
+      const data = await res.json()
+      setTiposPago(data || [])
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const cargarEstadosOrden = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/estados_orden`)
+      if (!res.ok) throw new Error('Error al obtener estados de orden')
+      const data = await res.json()
+      setEstadosOrden(data || [])
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const restockOrden = async (orden) => {
+    if (!orden?.items?.length) return
+
+    // Para cada item, sumamos la cantidad vendida de vuelta al stock del producto
+    for (const it of orden.items) {
+      const productoId = it.producto_id ?? it.producto?.id
+      if (!productoId) continue
+
+      const qty = getItemQty(it)
+      // Obtener stock actual desde backend para evitar usar valores viejos del item
+      const getRes = await fetch(`${API_BASE_URL}/productos/${productoId}`)
+      if (!getRes.ok) {
+        const msg = await getRes.text()
+        throw new Error(msg || `No se pudo leer stock del producto ${productoId}`)
+      }
+      const productoActual = await getRes.json()
+      const cantidadActual = Number(productoActual?.cantidad ?? 0)
+      const stockActual = Number.isFinite(cantidadActual) ? cantidadActual : 0
+      const nuevaCantidad = stockActual + qty
+
+      const putRes = await fetch(`${API_BASE_URL}/productos/${productoId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cantidad: nuevaCantidad }),
+      })
+
+      if (!putRes.ok) {
+        const msg = await putRes.text()
+        throw new Error(msg || `Error al devolver inventario del producto ${productoId}`)
+      }
+    }
+  }
+
+  const handleDeleteOrden = async (orden) => {
+    const id = orden?.id
+    if (!id) return
+    const confirmed = await confirm({
+      title: 'Eliminar orden',
+      message: 'Se eliminará esta orden y se devolverá el inventario de sus productos. Esta acción no se puede deshacer.',
+      confirmText: 'Sí, eliminar',
+      cancelText: 'Cancelar',
+      severity: 'error',
+    })
+    if (!confirmed) return
+
+    try {
+      setDeletingId(id)
+      await restockOrden(orden)
+
+      const res = await fetch(`${API_BASE_URL}/ordenes/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('Error al eliminar orden')
+      setOrdenes((prev) => prev.filter((o) => o.id !== id))
+      if (ordenSel?.id === id) setOrdenSel(null)
+      setSnack({ open: true, msg: 'Orden eliminada y inventario devuelto.', severity: 'success' })
+    } catch (err) {
+      setSnack({
+        open: true,
+        msg: 'No se pudo eliminar la orden ni devolver el inventario. Inténtalo de nuevo.',
+        severity: 'error',
+      })
+      console.error(err)
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+
+  const totalPeriodo = filtered.reduce(
+    (acc, o) => acc + calcTotal(o.items || [], getOrdenDescuento(o)),
+    0
+  )
+
+  const gananciaPeriodo = filtered.reduce(
+    (acc, o) => acc + calcGanancia(o.items || [], getOrdenDescuento(o)),
+    0
+  )
+
+  const [porcentajeComision, setPorcentajeComision] = React.useState(0);
+
+  const totalComision = React.useMemo(
+    () => (porcentajeComision ? (totalPeriodo * porcentajeComision) / 100 : 0),
+    [totalPeriodo, porcentajeComision]
+  )
+
+  const descuentoOrdenSel = getOrdenDescuento(ordenSel)
+  const itemsParaTotales = React.useMemo(() => {
+    if (!ordenSel?.items) return []
+    if (!modoEdicion) return ordenSel.items
+    return ordenSel.items.map((it) => ({
+      ...it,
+      cantidad: Number(cantidadesEdit[it.id] ?? it.cantidad),
+    }))
+  }, [ordenSel, modoEdicion, cantidadesEdit])
+  const subtotalOrdenSel = calcSubtotal(itemsParaTotales)
+  const totalOrdenSel = calcTotal(itemsParaTotales, descuentoOrdenSel)
+  const ordenEstaConfirmada = ordenSel ? !!confirmadas[ordenSel.id] : false
+  const puedeDividir = ordenSel?.estado_id === 2 && !ordenEstaConfirmada
+
+  React.useEffect(() => {
+    if (!ordenSel) {
+      setModoEdicion(false)
+      setCantidadesEdit({})
+      return
+    }
+    const initial = {}
+    for (const it of ordenSel.items || []) {
+      initial[it.id] = it.cantidad
+    }
+    setCantidadesEdit(initial)
+  }, [ordenSel?.id])
+
+  const handleConfirmOrden = async () => {
+    if (!ordenSel?.id) return
+    try {
+      setConfirmandoId(ordenSel.id)
+      const res = await fetch(`${API_BASE_URL}/ordenes/${ordenSel.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ estado_id: 3 }),
+      })
+      if (!res.ok) throw new Error('Error al confirmar orden')
+      const updated = await res.json()
+      setOrdenes((prev) => prev.map((o) => (o.id === ordenSel.id ? updated : o)))
+      setOrdenSel(updated)
+      setConfirmadas(prev => ({ ...prev, [ordenSel.id]: true }))
+      setSnack({ open: true, msg: 'Orden confirmada.', severity: 'success' })
+    } catch (err) {
+      console.error(err)
+      setSnack({ open: true, msg: 'No se pudo confirmar la orden. Inténtalo de nuevo.', severity: 'error' })
+    } finally {
+      setConfirmandoId(null)
+    }
+  }
+
+  const handleCancelarEdicion = () => {
+    if (!ordenSel) return
+    const initial = {}
+    for (const it of ordenSel.items || []) {
+      initial[it.id] = it.cantidad
+    }
+    setCantidadesEdit(initial)
+    setModoEdicion(false)
+  }
+
+  const handleSplitOrden = async () => {
+    if (!ordenSel) return
+    const items = (ordenSel.items || []).map((it) => ({
+      id: it.id,
+      cantidad_envio: Number(cantidadesEdit[it.id] ?? it.cantidad),
+    }))
+    if (items.some((i) => !Number.isInteger(i.cantidad_envio) || i.cantidad_envio < 0)) {
+      setSnack({ open: true, msg: 'Las cantidades deben ser números enteros mayores o iguales a 0.', severity: 'warning' })
+      return
+    }
+    const sumEnvio = items.reduce((s, i) => s + i.cantidad_envio, 0)
+    if (sumEnvio <= 0) {
+      setSnack({ open: true, msg: 'Al menos 1 unidad debe enviarse.', severity: 'warning' })
+      return
+    }
+    const sumOriginal = (ordenSel.items || []).reduce(
+      (s, i) => s + Number(i.cantidad || 0),
+      0
+    )
+    if (sumEnvio >= sumOriginal) {
+      setSnack({ open: true, msg: 'No hay nada que dividir. Si quieres enviar todo, usa Confirmar.', severity: 'warning' })
+      return
+    }
+
+    try {
+      setSplitting(true)
+      const res = await fetch(
+        `${API_BASE_URL}/ordenes/${ordenSel.id}/split`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items }),
+        }
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setSnack({ open: true, msg: err.error || 'No se pudo dividir la orden.', severity: 'error' })
+        return
+      }
+      const { orden_actual, orden_sobrante } = await res.json()
+      setOrdenes((prev) => {
+        const reemplazada = prev.map((o) =>
+          o.id === orden_actual.id ? orden_actual : o
+        )
+        return [...reemplazada, orden_sobrante]
+      })
+      const nuevasCantidades = {}
+      for (const it of orden_actual.items || []) {
+        nuevasCantidades[it.id] = it.cantidad
+      }
+      setCantidadesEdit(nuevasCantidades)
+      setModoEdicion(false)
+      setOrdenSel(orden_actual)
+      setSnack({
+        open: true,
+        msg: `Orden dividida. Nueva orden con el sobrante: ${orden_sobrante.codigo_orden}`,
+        severity: 'success',
+      })
+    } catch (err) {
+      console.error(err)
+      setSnack({ open: true, msg: 'No se pudo dividir la orden. Inténtalo de nuevo.', severity: 'error' })
+    } finally {
+      setSplitting(false)
+    }
+  }
+
+  const handlePrintOrden = () => {
+    if (!ordenSel) return
+
+    const fmtDate = (d) => (d ? dayjs(d).format('DD/MM/YYYY') : '')
+    const addDaysToDate = (dateValue, days) => {
+      if (!dateValue || !Number.isFinite(days)) return ''
+      return dayjs(dateValue).add(days, 'day').format('DD/MM/YYYY')
+    }
+    const numberFmt = (n) => `Q ${Number(n || 0).toFixed(2)}`
+    const itemsRows = (ordenSel.items || []).map((it) => {
+      const productoInfo = it.producto ?? productosById[it.producto_id]
+      const nombre =
+        productoInfo?.nombre ||
+        it.servicio?.nombre ||
+        it.nombre ||
+        `Item #${it.id}`
+      const sku = productoInfo?.codigo || it.codigo || ''
+      const price = getItemPrice(it)
+      const qty = getItemQty(it)
+      const subtotal = price * qty
+      return `
+        <tr>
+          <td class="center">${qty || ''}</td>
+          <td class="center">${sku || ''}</td>
+          <td>${nombre}</td>
+          <td class="center col-precio">${numberFmt(price)}</td>
+          <td class="center col-subtotal">${numberFmt(subtotal)}</td>
+        </tr>
+      `
+    }).join('')
+
+    const copyTypes = ['CLIENTE', 'VENTAS', 'BODEGA']
+    const fechaTexto = fmtDate(ordenSel.fecha_envio)
+    const codigo = ordenSel.codigo_orden ?? ordenSel.codigo ?? ordenSel.id ?? ''
+    const clienteInfo = ordenSel.cliente ?? clientesById[ordenSel.cliente_id]
+    const clienteNombre = clienteInfo?.nombre ?? ''
+    const clienteTel = clienteInfo?.telefono ?? ''
+    const clienteDir = clienteInfo?.direccion ?? ''
+    const clienteCodigo = clienteInfo?.codigo ?? ''
+    const tipoPagoKey = ordenSel.tipo_pago_id != null ? String(ordenSel.tipo_pago_id) : ''
+    let tipoPagoSeleccionado = null
+    for (const tipo of tiposPago) {
+      if (String(tipo?.id) === tipoPagoKey) {
+        tipoPagoSeleccionado = tipo
+        break
+      }
+    }
+    const pagoNombre =
+      tipoPagoSeleccionado?.nombre ||
+      ordenSel.forma_pago ||
+      ordenSel.metodo_pago ||
+      ordenSel.pago ||
+      ordenSel.tipo_pago_id ||
+      ''
+    const pago = pagoNombre.toString().toUpperCase()
+    const totalEnLetras = formatTotalEnLetras(totalOrdenSel)
+    const pagoNombreLower = pagoNombre.toString().toLowerCase()
+    let vencimiento = ''
+    if (pagoNombreLower.includes('credito')) {
+      const firstToken = pagoNombreLower.trim().split(/\s+/)[0]
+      const diasCredito = Number(firstToken)
+      if (Number.isFinite(diasCredito) && diasCredito > 0) {
+        vencimiento = addDaysToDate(ordenSel.fecha_envio, diasCredito)
+      }
+    }
+
+    const copiesHtml = copyTypes.map((tipo) => `
+      <div class="hoja" data-copy="${tipo}">
+        <div class="watermark">
+          <img src="${logoCoproda}" alt="Coproda" />
+        </div>
+        <div class="encabezado">
+          <div class="empresa">
+            <div class="title">COMPAÑÍA PROCESADORA DE ALUMINIO, S.A.</div>
+            <div class="sub">
+              ALUMINIO DE CALIDAD QUE PERDURA<br/>
+              PRODUCTO CENTROAMERICANO HECHO EN GUATEMALA<br/>
+              KM. 32 CARRETERA AL SALVADOR, FRACCIÓN 8, SAN JOSÉ EL CHORO, PROYECTO INDUSTRIAL EL ALTO, VILLA CANALES<br/>
+              TELEFONO: 5852-8466
+            </div>
+          </div>
+          <div class="caja">
+            <div class="label">ENVIO NO.</div>
+            <div class="valor">${codigo}</div>
+            <div class="label" style="margin-top:4px;">FECHA:</div>
+            <div class="valor">${fechaTexto}</div>
+          </div>
+        </div>
+
+        <div class="folio">
+          <span>CODIGO:</span>
+          <span class="valor">${clienteCodigo || ''}</span>
+          <span class="copy">${tipo}</span>
+        </div>
+
+        <div class="cliente">
+          <div><strong>CLIENTE:</strong> ${clienteNombre}</div>
+          <div><strong>DIRECCION:</strong> ${clienteDir || '______________________________'}</div>
+          <div><strong>TELEFONO:</strong> ${clienteTel || '________________'}</div>
+        </div>
+
+        <div class="datos">
+          <div><strong>NIT:</strong> __________</div>
+        </div>
+
+        <table class="tabla">
+          <thead>
+            <tr>
+              <th width="10%">CANTIDAD</th>
+              <th width="15%">COD.PROD.</th>
+              <th>DESCRIPCION</th>
+              <th width="15%" class="col-precio">P/UNITARIO</th>
+              <th width="15%" class="col-subtotal">SUB-TOTAL</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${itemsRows || '<tr><td colspan="5" class="center">Sin items</td></tr>'}
+          </tbody>
+        </table>
+
+        <div class="totales">
+          <div>TOTAL EN LETRAS: ${totalEnLetras || '_______________________________'}</div>
+          <div class="total-box">
+            <span>TOTAL</span>
+            <span class="cantidad">${numberFmt(totalOrdenSel)}</span>
+          </div>
+        </div>
+
+        <div class="firmas">
+          <div class="firma">
+            <div class="firma-linea"></div>
+            <div>FIRMA DEPTO. BODEGA:</div>
+          </div>
+          <div class="firma">
+            <div class="firma-linea"></div>
+            <div>${tipo === 'BODEGA' ? 'FIRMA DE TRANSPORTE' : 'FIRMA ACEPTACION CLIENTE'}:</div>
+          </div>
+        </div>
+      </div>
+    `).join('')
+
+    const html = `
+      <html>
+        <head>
+          <title>Orden ${codigo}</title>
+          <style>
+            @page { margin: 15mm; }
+            body { font-family: 'Times New Roman', serif; font-size: 12px; margin: 0; }
+            *, *::before, *::after { box-sizing: border-box; }
+            .watermark {
+              position: absolute;
+              inset: 0;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              opacity: 0.08;
+              pointer-events: none;
+              z-index: 0;
+            }
+            .watermark img {
+              width: 100%;
+              max-width: 1000px;
+              height: auto;
+              filter: grayscale(100%);
+            }
+            .hoja {
+              border: 1px solid #222;
+              padding: 10px 12px 14px;
+              margin-bottom: 16px;
+              page-break-inside: avoid;
+              position: relative;
+              width: calc(100% - 2px);
+            }
+            .encabezado { display: grid; grid-template-columns: 1fr 150px; gap: 8px; align-items: center; }
+            .empresa .title { font-weight: 900; text-align: center; font-size: 14px; }
+            .empresa .sub { text-align: center; font-size: 10px; line-height: 1.3; margin-top: 2px; }
+            .caja { border: 1px solid #000; padding: 6px; font-size: 11px; }
+            .caja .label { font-weight: 700; }
+            .caja .valor { border: 1px solid #000; padding: 3px 4px; text-align: center; margin-top: 2px; }
+            .folio { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; font-weight: 700; }
+            .folio .valor { padding: 2px 6px; border: 1px solid #000; }
+            .folio .copy { margin-left: auto; padding: 4px 12px; border: 1px solid #c00; font-size: 14px; font-weight: 900; }
+            .cliente { display: grid; grid-template-columns: 1fr; row-gap: 4px; margin-bottom: 8px; }
+            .datos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; font-weight: 700; }
+            .tabla { width: 100%; border-collapse: collapse; font-size: 12px; }
+            .tabla th, .tabla td { border: 1px solid #000; padding: 6px 5px; }
+            .tabla th { text-align: center; font-weight: 700; }
+            .center { text-align: center; }
+            .totales { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+            .total-box { display: flex; align-items: center; gap: 10px; border: 1px solid #000; padding: 6px 10px; font-weight: 900; }
+            .cantidad { font-size: 16px; }
+            .hoja[data-copy="BODEGA"] .col-precio,
+            .hoja[data-copy="BODEGA"] .col-subtotal { display: none !important; }
+            .hoja[data-copy="BODEGA"] .totales { display: none !important; }
+            .firmas { display: flex; justify-content: space-between; margin-top: 20px; font-weight: 700; gap: 20px; }
+            .firma { flex: 1; }
+            .firma-linea { border-top: 1px solid #000; margin: 65px 0 6px; }
+          </style>
+        </head>
+        <body>
+          ${copiesHtml}
+        </body>
+      </html>
+    `
+
+    const w = window.open('', '_blank', 'width=400,height=600')
+    if (!w) return
+    w.document.write(html)
+    w.document.close()
+    w.focus()
+    w.print()
+  }
+
+  // 🔹 Cada vez que cambia el rango, pedir órdenes al backend
+  React.useEffect(() => {
+    if (!rangeFrom || !rangeTo || !rangeFrom.isValid() || !rangeTo.isValid()) return
+
+    const inicioIso = rangeFrom.startOf('day').toDate().toISOString()
+    const finIso    = rangeTo.endOf('day').toDate().toISOString()
+
+    cargarOrdenes(inicioIso, finIso)
+  }, [rangeFrom, rangeTo])
+
+  React.useEffect(() => {
+    cargarProductos()
+    cargarClientes()
+    cargarTiposPago()
+    cargarEstadosOrden()
+  }, [])
+
+  return (
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
+      <Box sx={{ maxWidth: 1100, mx: 'auto', mt: 3 }}>
+        <Typography variant="h5" sx={{ mb: 2, fontWeight: 600 }}>
+          Bodega
+        </Typography>
+
+        
+        <Paper sx={{ p: 2, borderRadius: 3, mb: 2 }}>
+          {/* Fila original: rango de fechas + total período */}
+          <Stack
+            direction={{ xs: 'column', sm: 'row' }}
+            spacing={2}
+            alignItems="center"
+          >
+            <DatePicker
+              label="Desde"
+              value={rangeFrom}
+              onChange={(newVal) => setRangeFrom(newVal)}
+              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+            />
+            <DatePicker
+              label="Hasta"
+              value={rangeTo}
+              onChange={(newVal) => setRangeTo(newVal)}
+              slotProps={{ textField: { size: 'small', fullWidth: true } }}
+            />
+
+            <Chip
+              label={`Total en el período: ${formatQuetzales(totalPeriodo)}`}
+              color="primary"
+              sx={{ fontWeight: 600 }}
+            />
+          </Stack>
+
+          
+        </Paper>
+
+        <TableContainer component={Paper} sx={{ borderRadius: 3 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Fecha</TableCell>
+                <TableCell>No. Orden</TableCell>
+                <TableCell>Cliente</TableCell>
+                <TableCell>Pago</TableCell>
+                <TableCell align="right">Total</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {filtered.map((o) => {
+                const clienteInfo = o.cliente ?? clientesById[o.cliente_id]
+                const tipoPagoKey = o.tipo_pago_id != null ? String(o.tipo_pago_id) : ''
+                let tipoPagoNombre = ''
+                for (const tipo of tiposPago) {
+                  if (String(tipo?.id) === tipoPagoKey) {
+                    tipoPagoNombre = tipo?.nombre || ''
+                    break
+                  }
+                }
+                return (
+                  <TableRow
+                    key={o.id}
+                    hover
+                    sx={{ cursor: 'pointer' }}
+                    onClick={() => setOrdenSel(o)}
+                  >
+                    <TableCell>{formatFecha(o.actualizado_en)}</TableCell>
+                    <TableCell>{o.codigo_orden || o.codigo || o.id}</TableCell>
+                    <TableCell>{clienteInfo?.nombre || '-'}</TableCell>
+                    <TableCell>{tipoPagoNombre || '-'}</TableCell>
+                    <TableCell align="right">
+                      {formatQuetzales(calcTotal(o.items || [], getOrdenDescuento(o)))}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+              {loadingOrdenes && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Stack direction="row" spacing={1.5} alignItems="center" justifyContent="center" sx={{ py: 2 }}>
+                      <CircularProgress size={20} />
+                      <Typography color="text.secondary">Cargando órdenes…</Typography>
+                    </Stack>
+                  </TableCell>
+                </TableRow>
+              )}
+              {!loadingOrdenes && filtered.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Typography color="text.secondary" align="center">
+                      No hay ventas en el rango seleccionado
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+
+          </Table>
+        </TableContainer>
+
+        {/* -------- Dialog Detalle de Orden -------- */}
+        <Dialog open={!!ordenSel} onClose={() => setOrdenSel(null)} maxWidth="sm" fullWidth>
+          <DialogTitle>Orden {ordenSel?.codigo_orden || ordenSel?.codigo || ordenSel?.id || '-'}</DialogTitle>
+          <DialogContent dividers>
+            <Stack spacing={1} sx={{ mb: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                Fecha: {ordenSel ? formatFecha(ordenSel.actualizado_en) : '—'}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Cliente: {(ordenSel?.cliente ?? clientesById[ordenSel?.cliente_id])?.nombre || '-'} — {(ordenSel?.cliente ?? clientesById[ordenSel?.cliente_id])?.telefono || '-'}
+              </Typography>
+            </Stack>
+
+            <Divider sx={{ mb: 2 }} />
+
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Producto</TableCell>
+                  <TableCell>SKU</TableCell>
+                  <TableCell align="right">Precio</TableCell>
+                  <TableCell align="right">Cant.</TableCell>
+                  <TableCell align="right">Subtotal</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {ordenSel?.items?.map((it) => {
+                  const productoInfo = it.producto ?? productosById[it.producto_id]
+                  let nombre = ''
+                  if (it.tipo === 'servicio') {
+                    nombre =
+                      it.servicio?.descripcion ||
+                      it.nombre ||
+                      `Servicio #${it.servicio_id ?? it.id}`
+                  } else { // asumimos 'producto'
+                    nombre =
+                      productoInfo?.nombre ||
+                      productoInfo?.descripcion ||
+                      it.nombre ||
+                      `Producto #${it.producto_id ?? it.id}`
+                  }
+
+                  // 🔹 SKU según tipo
+                  let sku = productoInfo?.codigo || it.codigo || ''
+
+                  const price =
+                    getItemPrice(it) ||
+                    it.servicio?.precio ||
+                    0
+
+                  const qty = getItemQty(it)
+                  const qtyEdit = Number(cantidadesEdit[it.id] ?? qty)
+                  const qtyUsada = modoEdicion ? qtyEdit : qty
+
+                  return (
+                    <TableRow key={it.id}>
+                      <TableCell>{nombre}</TableCell>
+                      <TableCell>{sku}</TableCell>
+                      <TableCell align="right">{formatQuetzales(price)}</TableCell>
+                      <TableCell align="right">
+                        {modoEdicion ? (
+                          <Stack direction="row" spacing={1} alignItems="center" justifyContent="flex-end">
+                            <TextField
+                              type="number"
+                              size="small"
+                              value={cantidadesEdit[it.id] ?? qty}
+                              onChange={(e) => {
+                                const val = e.target.value
+                                setCantidadesEdit((prev) => ({
+                                  ...prev,
+                                  [it.id]: val === '' ? '' : Number(val),
+                                }))
+                              }}
+                              inputProps={{ min: 0, max: qty, step: 1 }}
+                              sx={{ width: 90 }}
+                            />
+                            <Typography variant="caption" color="text.secondary">
+                              de {qty}
+                            </Typography>
+                          </Stack>
+                        ) : (
+                          qty
+                        )}
+                      </TableCell>
+                      <TableCell align="right">{formatQuetzales(price * qtyUsada)}</TableCell>
+                    </TableRow>
+                  )
+                })}
+
+
+                <TableRow>
+                  <TableCell colSpan={4} align="right" sx={{ fontWeight: 600 }}>
+                    Subtotal
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 600 }}>
+                    {formatQuetzales(subtotalOrdenSel)}
+                  </TableCell>
+                </TableRow>
+                {descuentoOrdenSel > 0 && (
+                  <TableRow>
+                    <TableCell colSpan={4} align="right" sx={{ fontWeight: 600 }}>
+                      Descuento
+                    </TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 600 }}>
+                      {`- ${formatQuetzales(descuentoOrdenSel)}`}
+                    </TableCell>
+                  </TableRow>
+                )}
+                <TableRow>
+                  <TableCell colSpan={4} align="right" sx={{ fontWeight: 700 }}>
+                    Total
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 700 }}>
+                    {formatQuetzales(totalOrdenSel)}
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </DialogContent>
+          <DialogActions sx={{ flexWrap: 'wrap', gap: 1 }}>
+            {ordenSel && modoEdicion && (
+              <>
+                <Button
+                  variant="contained"
+                  color="warning"
+                  onClick={handleSplitOrden}
+                  disabled={splitting}
+                >
+                  {splitting ? 'Dividiendo…' : 'Dividir orden'}
+                </Button>
+                <Button variant="outlined" onClick={handleCancelarEdicion} disabled={splitting}>
+                  Cancelar edición
+                </Button>
+              </>
+            )}
+            {ordenSel && !modoEdicion && (
+              <>
+                {/* Acción principal: Confirmar */}
+                <Button
+                  variant="contained"
+                  color={ordenEstaConfirmada ? 'success' : 'primary'}
+                  onClick={handleConfirmOrden}
+                  disabled={ordenEstaConfirmada || confirmandoId === ordenSel.id}
+                >
+                  {ordenEstaConfirmada
+                    ? 'Confirmado'
+                    : confirmandoId === ordenSel.id
+                      ? 'Confirmando…'
+                      : 'Confirmar'}
+                </Button>
+                {/* Acciones secundarias */}
+                {puedeDividir && (
+                  <Button
+                    variant="outlined"
+                    color="warning"
+                    onClick={() => setModoEdicion(true)}
+                  >
+                    Editar cantidades
+                  </Button>
+                )}
+                {ordenEstaConfirmada && (
+                  <Button variant="outlined" onClick={handlePrintOrden}>
+                    Imprimir
+                  </Button>
+                )}
+                {/* Acción destructiva al final */}
+                {puedeEditarBodega && (
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    onClick={() => handleDeleteOrden(ordenSel)}
+                    disabled={deletingId === ordenSel.id}
+                  >
+                    {deletingId === ordenSel.id ? 'Eliminando…' : 'Eliminar'}
+                  </Button>
+                )}
+              </>
+            )}
+            <Button variant="outlined" color="inherit" onClick={() => setOrdenSel(null)} disabled={splitting}>
+              Cerrar
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Snackbar
+          open={snack.open}
+          autoHideDuration={4000}
+          onClose={() => setSnack((s) => ({ ...s, open: false }))}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert
+            severity={snack.severity}
+            variant="filled"
+            onClose={() => setSnack((s) => ({ ...s, open: false }))}
+            sx={{ width: '100%' }}
+          >
+            {snack.msg}
+          </Alert>
+        </Snackbar>
+      </Box>
+    </LocalizationProvider>
+  )
+}

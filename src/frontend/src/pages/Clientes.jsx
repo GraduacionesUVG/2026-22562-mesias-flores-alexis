@@ -1,0 +1,1414 @@
+import * as React from 'react'
+import {
+  Box, Paper, Typography, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
+  Stack, TextField, Chip, Dialog, DialogTitle, DialogContent, DialogActions, Button, Divider, Checkbox, MenuItem,
+  Snackbar, Alert, Tooltip, CircularProgress, InputAdornment
+} from '@mui/material'
+import AddCircleIcon from '@mui/icons-material/AddCircle'
+import PersonAddAltIcon from '@mui/icons-material/PersonAddAlt'
+import EditIcon from '@mui/icons-material/Edit'
+import AutorenewIcon from '@mui/icons-material/Autorenew'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import dayjs from 'dayjs'
+import { API_BASE_URL } from '../config/api'
+import { useAuth } from '../context/AuthContext'
+import { useConfirm } from '../components/ConfirmProvider'
+import PaginacionTabla, { usePaginacion } from '../components/PaginacionTabla'
+import { formatFecha, formatQuetzales } from '../utils/format'
+
+// Etiquetas claras para la clasificación de precio del cliente
+const CLASIFICACION_LABEL = {
+  cf: 'CF (Consumidor Final)',
+  minorista: 'Minorista',
+  mayorista: 'Mayorista',
+}
+
+// Calcula total de una orden a partir de sus items
+function calcTotal(items = []) {
+  return items.reduce((s, it) => {
+    const precio = it.precio ?? it.price ?? it.precio_unitario ?? 0
+    const qty = it.cantidad ?? it.qty ?? 1
+    return s + precio * qty
+  }, 0)
+}
+
+const DEPARTAMENTOS_GUATEMALA = [
+  'Alta Verapaz',
+  'Baja Verapaz',
+  'Chimaltenango',
+  'Chiquimula',
+  'El Progreso',
+  'Escuintla',
+  'Guatemala',
+  'Huehuetenango',
+  'Izabal',
+  'Jalapa',
+  'Jutiapa',
+  'Petén',
+  'Quetzaltenango',
+  'Quiché',
+  'Retalhuleu',
+  'Sacatepéquez',
+  'San Marcos',
+  'Santa Rosa',
+  'Sololá',
+  'Suchitepéquez',
+  'Totonicapán',
+  'Zacapa',
+]
+
+const DEPARTAMENTO_ABBR = {
+  'Alta Verapaz': 'AV',
+  'Baja Verapaz': 'BV',
+  'Chimaltenango': 'CHM',
+  'Chiquimula': 'CHQ',
+  'El Progreso': 'PRO',
+  'Escuintla': 'ESC',
+  'Guatemala': 'GUA',
+  'Huehuetenango': 'HUE',
+  'Izabal': 'IZA',
+  'Jalapa': 'JAL',
+  'Jutiapa': 'JUT',
+  'Petén': 'PET',
+  'Quetzaltenango': 'QUE',
+  'Quiché': 'QUI',
+  'Retalhuleu': 'RET',
+  'Sacatepéquez': 'SAC',
+  'San Marcos': 'SM',
+  'Santa Rosa': 'SR',
+  'Sololá': 'SOL',
+  'Suchitepéquez': 'SUC',
+  'Totonicapán': 'TOT',
+  'Zacapa': 'ZAC',
+}
+
+const getInitials = (name) => {
+  return (name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() || '')
+    .join('')
+}
+
+const buildCodigoCliente = ({ nombre, departamento }) => {
+  const initials = getInitials(nombre)
+  const unique = Date.now().toString().slice(-6)
+  const deptoAbbr = DEPARTAMENTO_ABBR[departamento] || ''
+  return [initials, unique, deptoAbbr].filter(Boolean).join('')
+}
+
+export default function Clientes() {
+  const { user, hasAnyPermiso } = useAuth()
+  const confirm = useConfirm()
+  const isMaestro = hasAnyPermiso(['maestro'])
+  const shouldFilterPorUsuario = hasAnyPermiso(['ClientesVentas']) && !isMaestro
+  // Aviso no bloqueante (Snackbar). severity: 'success' | 'error' | 'info' | 'warning'
+  const [snack, setSnack] = React.useState({ open: false, message: '', severity: 'info' })
+  const mostrarAviso = React.useCallback((message, severity = 'info') => {
+    setSnack({ open: true, message, severity })
+  }, [])
+  const cerrarAviso = React.useCallback((_event, reason) => {
+    if (reason === 'clickaway') return
+    setSnack((prev) => ({ ...prev, open: false }))
+  }, [])
+  // Indicadores de carga de datos (solo UI; no altera los fetch)
+  const [cargandoClientes, setCargandoClientes] = React.useState(true)
+  const [cargandoOrdenes, setCargandoOrdenes] = React.useState(true)
+  const [query, setQuery] = React.useState('')
+  const [usuarioFiltro, setUsuarioFiltro] = React.useState('todos')
+  const [ordenes, setOrdenes] = React.useState([])
+  const [clientesRaw, setClientesRaw] = React.useState([])
+  const [estadosOrden, setEstadosOrden] = React.useState([])
+  const [productosById, setProductosById] = React.useState({})
+  const [tiposPago, setTiposPago] = React.useState([])
+  const [bancos, setBancos] = React.useState([])
+  const [usuarios, setUsuarios] = React.useState([])
+  const [clienteSel, setClienteSel] = React.useState(null)   // objeto cliente agregado
+  const [ordenSel, setOrdenSel] = React.useState(null)       // objeto orden para el diálogo
+  const [abonoDialog, setAbonoDialog] = React.useState({
+    open: false,
+    cliente: null,
+    selected: new Set(),
+    loading: false,
+    error: '',
+  })
+  const [clienteDialog, setClienteDialog] = React.useState({
+    open: false,
+    mode: 'create',
+    id: null,
+    codigo: '',
+    nombre: '',
+    telefono: '',
+    departamento: '',
+    direccion: '',
+    usuario_id: '',
+    clasificacion: 'cf',
+    saldo: '',
+    activo: true,
+    loading: false,
+    error: '',
+  })
+  
+
+  const cargarOrdenes = React.useCallback(async () => {
+    setCargandoOrdenes(true)
+    try {
+      const res = await fetch(`${API_BASE_URL}/ordenes`)
+      if (!res.ok) {
+        const txt = await res.text()
+        console.error('Error backend /ordenes:', txt)
+        mostrarAviso('No pudimos cargar las órdenes. Revisa tu conexión e inténtalo de nuevo.', 'error')
+        return
+      }
+      const data = await res.json()
+      console.log('Ordenes cargadas:', data)
+      setOrdenes(data)
+    } catch (err) {
+      console.error('Error de red al cargar ordenes:', err)
+      mostrarAviso('No pudimos cargar las órdenes. Revisa tu conexión e inténtalo de nuevo.', 'error')
+    } finally {
+      setCargandoOrdenes(false)
+    }
+  }, [mostrarAviso])
+
+  const cargarClientes = React.useCallback(async () => {
+    setCargandoClientes(true)
+    try {
+      const res = await fetch(`${API_BASE_URL}/clientes`)
+      if (!res.ok) {
+        const txt = await res.text()
+        console.error('Error backend /clientes:', txt)
+        mostrarAviso('No pudimos cargar los clientes. Revisa tu conexión e inténtalo de nuevo.', 'error')
+        return
+      }
+      const data = await res.json()
+      setClientesRaw(data || [])
+    } catch (err) {
+      console.error('Error de red al cargar clientes:', err)
+      mostrarAviso('No pudimos cargar los clientes. Revisa tu conexión e inténtalo de nuevo.', 'error')
+    } finally {
+      setCargandoClientes(false)
+    }
+  }, [mostrarAviso])
+
+  const cargarProductos = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/productos`)
+      if (!res.ok) throw new Error('Error al obtener productos')
+      const data = await res.json()
+      const map = {}
+      for (const producto of data || []) {
+        if (producto?.id != null) {
+          map[producto.id] = producto
+        }
+      }
+      setProductosById(map)
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
+  const cargarTiposPago = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/tipos_pago`)
+      if (!res.ok) {
+        const txt = await res.text()
+        console.error('Error backend /tipos_pago:', txt)
+        return
+      }
+      const data = await res.json()
+      setTiposPago(data || [])
+    } catch (err) {
+      console.error('Error de red al cargar tipos de pago:', err)
+    }
+  }, [])
+
+  const cargarBancos = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/bancos`)
+      if (!res.ok) {
+        const txt = await res.text()
+        console.error('Error backend /bancos:', txt)
+        return
+      }
+      const data = await res.json()
+      setBancos(data || [])
+    } catch (err) {
+      console.error('Error de red al cargar bancos:', err)
+    }
+  }, [])
+
+  const cargarEstadosOrden = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/estados_orden`)
+      if (!res.ok) {
+        const txt = await res.text()
+        console.error('Error backend /estados_orden:', txt)
+        return
+      }
+      const data = await res.json()
+      setEstadosOrden(data || [])
+    } catch (err) {
+      console.error('Error de red al cargar estados:', err)
+    }
+  }, [])
+
+  const cargarUsuarios = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/usuarios`)
+      if (!res.ok) {
+        const txt = await res.text()
+        console.error('Error backend /usuarios:', txt)
+        return
+      }
+      const data = await res.json()
+      setUsuarios(data || [])
+    } catch (err) {
+      console.error('Error de red al cargar usuarios:', err)
+    }
+  }, [])
+
+  // Cargar órdenes desde el backend
+  React.useEffect(() => {
+    cargarOrdenes()
+  }, [cargarOrdenes])
+
+  // Cargar clientes desde el backend
+  React.useEffect(() => {
+    cargarClientes()
+    cargarProductos()
+    cargarUsuarios()
+  }, [cargarClientes, cargarProductos, cargarUsuarios])
+
+  // Cargar tipos de pago y bancos desde el backend
+  React.useEffect(() => {
+    cargarTiposPago()
+    cargarBancos()
+  }, [cargarTiposPago, cargarBancos])
+
+  // Cargar estados de orden desde el backend
+  React.useEffect(() => {
+    cargarEstadosOrden()
+  }, [cargarEstadosOrden])
+
+  const ordenesPendientesPago = React.useMemo(() => {
+    const estadoPendiente = estadosOrden.find(
+      (estado) => String(estado?.nombre || '').toLowerCase() === 'pendiente de pago'
+    )
+    if (!estadoPendiente?.id) return ordenes
+    return ordenes.filter(
+      (orden) => String(orden?.estado_id) === String(estadoPendiente.id)
+    )
+  }, [ordenes, estadosOrden])
+
+  const getDiasCreditoForOrden = React.useCallback((orden) => {
+    const tipoPagoKey = orden?.tipo_pago_id != null ? String(orden.tipo_pago_id) : ''
+    let tipoPagoSeleccionado = null
+    for (const tipo of tiposPago) {
+      if (String(tipo?.id) === tipoPagoKey) {
+        tipoPagoSeleccionado = tipo
+        break
+      }
+    }
+    const nombrePago = (tipoPagoSeleccionado?.nombre || '').toLowerCase()
+    if (!nombrePago.includes('credito')) return 0
+
+    const firstToken = nombrePago.trim().split(/\s+/)[0]
+    const diasCredito = Number(firstToken)
+    return Number.isFinite(diasCredito) ? diasCredito : 0
+  }, [tiposPago])
+
+  // Días que faltan para que venza el crédito de una orden (negativo = vencida).
+  // Mismo cálculo que se muestra en la columna "Días de crédito".
+  const getDiasRestantesOrden = React.useCallback((orden) => {
+    const fechaBase = orden?.fecha_envio || orden?.fecha
+    const diasTranscurridos = fechaBase ? dayjs().diff(dayjs(fechaBase), 'day') : 0
+    return getDiasCreditoForOrden(orden) - diasTranscurridos
+  }, [getDiasCreditoForOrden])
+
+  // ---- Construir "clientes" agregando info desde las órdenes ----
+  const clientes = React.useMemo(() => {
+    const ordersByCliente = new Map()
+    for (const o of ordenesPendientesPago) {
+      const id = o.cliente_id ?? o.cliente?.id
+      if (id == null) continue
+      if (!ordersByCliente.has(id)) {
+        ordersByCliente.set(id, [])
+      }
+      ordersByCliente.get(id).push(o)
+    }
+
+    let arr = (clientesRaw || []).map((cli) => {
+      const orders = ordersByCliente.get(cli.id) || []
+      const total = orders.reduce((sum, o) => sum + calcTotal(o.items || []), 0)
+      let ultima = null
+      for (const o of orders) {
+        if (!ultima || dayjs(o.fecha).isAfter(dayjs(ultima))) {
+          ultima = o.fecha
+        }
+      }
+      const saldoNum = Number(cli.saldo)
+      const debe = orders.length > 0 || (Number.isFinite(saldoNum) && saldoNum > 0)
+      // La orden más urgente del cliente (más negativa = deuda más vieja)
+      const diasRestantesMin = orders.length
+        ? Math.min(...orders.map((o) => getDiasRestantesOrden(o)))
+        : null
+      return {
+        ...cli,
+        ordenes: orders,
+        total,
+        ultima,
+        debe,
+        diasRestantesMin,
+      }
+    })
+
+    // filtro por texto (nombre o teléfono)
+    if (query.trim()) {
+      const q = query.toLowerCase()
+      arr = arr.filter(c =>
+        (c.nombre || '').toLowerCase().includes(q) ||
+        (c.telefono || '').toLowerCase().includes(q) ||
+        (c.codigo || '').toLowerCase().includes(q)
+      )
+    }
+
+    if (isMaestro && usuarioFiltro !== 'todos') {
+      arr = arr.filter((c) => String(c?.usuario_id) === String(usuarioFiltro))
+    }
+
+    if (shouldFilterPorUsuario && user?.id != null) {
+      arr = arr.filter((c) => String(c?.usuario_id) === String(user.id))
+    }
+
+    // Primero los que deben (deuda más vieja arriba), al final los que no deben.
+    // Como desempate se mantiene última compra desc.
+    arr.sort((a, b) => {
+      if (a.debe !== b.debe) return a.debe ? -1 : 1
+      const aUrgencia = a.diasRestantesMin ?? Infinity
+      const bUrgencia = b.diasRestantesMin ?? Infinity
+      if (aUrgencia !== bUrgencia) return aUrgencia - bUrgencia
+      const aDate = a.ultima ? dayjs(a.ultima).valueOf() : -Infinity
+      const bDate = b.ultima ? dayjs(b.ultima).valueOf() : -Infinity
+      return bDate - aDate
+    })
+    return arr
+  }, [ordenesPendientesPago, query, clientesRaw, usuarioFiltro, isMaestro, shouldFilterPorUsuario, user?.id, getDiasRestantesOrden])
+
+  const {
+    itemsPagina: clientesPagina,
+    paginacion: paginacionClientes,
+    reset: resetPaginacionClientes,
+  } = usePaginacion(clientes)
+
+  // Al cambiar los filtros volvemos a la primera página
+  React.useEffect(() => {
+    resetPaginacionClientes()
+  }, [query, usuarioFiltro, resetPaginacionClientes])
+
+  React.useEffect(() => {
+    if (!shouldFilterPorUsuario || user?.id == null) return
+    if (!clienteSel) return
+    if (String(clienteSel?.usuario_id) === String(user.id)) return
+    setClienteSel(null)
+  }, [shouldFilterPorUsuario, user?.id, clienteSel])
+
+  const clientesById = React.useMemo(() => {
+    const map = {}
+    for (const cli of clientesRaw || []) {
+      if (cli?.id != null) {
+        map[cli.id] = cli
+      }
+    }
+    return map
+  }, [clientesRaw])
+
+  // Órdenes del cliente seleccionado: primero las más vencidas
+  // (días de crédito más negativos); a igualdad, la más antigua primero.
+  const ordenesCliente = React.useMemo(() => {
+    if (!clienteSel) return []
+    return clienteSel.ordenes
+      .slice()
+      .sort((a, b) => {
+        const diff = getDiasRestantesOrden(a) - getDiasRestantesOrden(b)
+        if (diff !== 0) return diff
+        return dayjs(a.fecha).valueOf() - dayjs(b.fecha).valueOf()
+      })
+  }, [clienteSel, getDiasRestantesOrden])
+
+  const saldoCliente = React.useMemo(() => {
+    if (!clienteSel) return 0
+    const raw = clienteSel.saldo ?? 0
+    const num = Number(raw)
+    return Number.isFinite(num) ? num : 0
+  }, [clienteSel])
+
+  const abonosCliente = React.useMemo(() => {
+    if (!clienteSel) return 0
+    const raw = clienteSel.abonos ?? clienteSel.total_abonos ?? 0
+    const num = Number(raw)
+    return Number.isFinite(num) ? num : 0
+  }, [clienteSel])
+
+  const pagosPendientesCliente = React.useMemo(() => {
+    return (bancos || [])
+      .filter((b) => b?.asignado === false)
+      .map((b) => ({
+        id: b.id,
+        fecha: b.fecha,
+        referencia: b.referencia || b.banco || '',
+        cantidad: b.monto ?? 0,
+      }))
+  }, [bancos])
+
+  const totalSeleccionadoAbono = React.useMemo(() => {
+    if (!abonoDialog.selected || pagosPendientesCliente.length === 0) return 0
+    return pagosPendientesCliente.reduce((sum, pago) => {
+      return abonoDialog.selected.has(pago.id) ? sum + Number(pago.cantidad || 0) : sum
+    }, 0)
+  }, [abonoDialog.selected, pagosPendientesCliente])
+
+  const togglePagoSeleccion = (id) => {
+    setAbonoDialog(prev => {
+      const next = new Set(prev.selected)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return { ...prev, selected: next }
+    })
+  }
+
+  const handleOpenAbono = (cliente) => {
+    setAbonoDialog({
+      open: true,
+      cliente,
+      selected: new Set(),
+      loading: false,
+      error: '',
+    })
+  }
+
+  const handleCerrarAbono = () => {
+    setAbonoDialog({
+      open: false,
+      cliente: null,
+      selected: new Set(),
+      loading: false,
+      error: '',
+    })
+  }
+
+  const handleConfirmarAbono = async () => {
+    if (!abonoDialog.cliente) return
+    const clienteId = abonoDialog.cliente.id
+    const selectedIds = Array.from(abonoDialog.selected || [])
+
+    setAbonoDialog(prev => ({ ...prev, loading: true, error: '' }))
+
+    for (const bancoId of selectedIds) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/ordenes/abonos`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cliente_id: clienteId,
+            banco_id: bancoId,
+          }),
+        })
+
+        if (!res.ok) {
+          const txt = await res.text()
+          let msg = 'No se pudo asignar el abono'
+          try {
+            const parsed = JSON.parse(txt)
+            msg = parsed.error || msg
+          } catch (_) {
+            // noop
+          }
+          throw new Error(msg)
+        }
+      } catch (err) {
+        console.error('Error asignando abono:', err)
+        setAbonoDialog(prev => ({
+          ...prev,
+          loading: false,
+          error: err?.message || 'Error de red al asignar el abono',
+        }))
+        return
+      }
+    }
+
+    await Promise.all([cargarOrdenes(), cargarClientes(), cargarBancos()])
+    handleCerrarAbono()
+  }
+
+  const [recalculandoCartera, setRecalculandoCartera] = React.useState(false)
+
+  const handleRecalcularCartera = async () => {
+    if (!clienteSel?.id) return
+    const confirmado = await confirm({
+      title: 'Recalcular cartera',
+      message:
+        `Se va a recalcular la cartera del cliente "${clienteSel.nombre}". ` +
+        `Esto reaplicará todos los abonos existentes a las órdenes según su urgencia. ` +
+        `¿Deseas continuar?`,
+      confirmText: 'Sí, recalcular',
+      cancelText: 'Cancelar',
+      severity: 'error',
+    })
+    if (!confirmado) return
+
+    try {
+      setRecalculandoCartera(true)
+      const res = await fetch(
+        `${API_BASE_URL}/clientes/${clienteSel.id}/recalcular-cartera`,
+        { method: 'POST' }
+      )
+      if (!res.ok) {
+        const txt = await res.text()
+        let msg = 'No se pudo recalcular la cartera. Inténtalo de nuevo.'
+        try {
+          const parsed = JSON.parse(txt)
+          msg = parsed.error || msg
+        } catch (_) {}
+        mostrarAviso(msg, 'error')
+        return
+      }
+      await Promise.all([cargarOrdenes(), cargarClientes(), cargarBancos()])
+      mostrarAviso('Cartera recalculada. Los saldos de las órdenes se actualizaron.', 'success')
+    } catch (err) {
+      console.error(err)
+      mostrarAviso('No pudimos recalcular la cartera. Revisa tu conexión e inténtalo de nuevo.', 'error')
+    } finally {
+      setRecalculandoCartera(false)
+    }
+  }
+
+  const handleOpenClienteDialog = () => {
+    setClienteDialog({
+      open: true,
+      mode: 'create',
+      id: null,
+      codigo: '',
+      nombre: '',
+      telefono: '',
+      departamento: '',
+      direccion: '',
+      usuario_id: '',
+      clasificacion: 'cf',
+      saldo: '',
+      loading: false,
+      error: '',
+    })
+  }
+
+  const handleOpenEditCliente = (cliente) => {
+    const direccion = (cliente?.direccion || '').trim()
+    let departamento = ''
+    let direccionDetalle = direccion
+    if (direccion.includes(',')) {
+      const [posibleDepartamento, ...resto] = direccion.split(',')
+      const depto = posibleDepartamento.trim()
+      if (DEPARTAMENTOS_GUATEMALA.includes(depto)) {
+        departamento = depto
+        direccionDetalle = resto.join(',').trim()
+      }
+    }
+
+    setClienteDialog({
+      open: true,
+      mode: 'edit',
+      id: cliente?.id ?? null,
+      codigo: cliente?.codigo || '',
+      nombre: cliente?.nombre || '',
+      telefono: cliente?.telefono || '',
+      departamento,
+      direccion: direccionDetalle,
+      usuario_id: cliente?.usuario_id ?? '',
+      clasificacion: cliente?.clasificacion_precio || 'cf',
+      saldo: cliente?.saldo != null ? String(cliente.saldo) : '',
+      activo: cliente?.activo ?? true,
+      loading: false,
+      error: '',
+    })
+  }
+
+  const handleCloseClienteDialog = () => {
+    setClienteDialog((prev) => ({ ...prev, open: false, loading: false }))
+  }
+
+  const handleCrearCliente = async (e) => {
+    e?.preventDefault()
+    setClienteDialog((prev) => ({ ...prev, loading: true, error: '' }))
+
+    const nombre = (clienteDialog.nombre || '').trim()
+    const telefono = clienteDialog.telefono.trim() || null
+    const direccionInput = clienteDialog.direccion.trim()
+    const departamento = (clienteDialog.departamento || '').trim()
+    const direccion = departamento
+      ? [departamento, direccionInput].filter(Boolean).join(', ')
+      : (direccionInput || null)
+    const clasificacion_precio = clienteDialog.clasificacion
+    const saldoValue = clienteDialog.saldo.toString().trim()
+    const saldo = saldoValue === '' ? null : Number(saldoValue)
+    const usuarioIdRaw = clienteDialog.usuario_id
+    const usuarioId = usuarioIdRaw === '' ? null : Number(usuarioIdRaw)
+    const usuarioPayload = Number.isFinite(usuarioId)
+      ? { usuario_id: usuarioId }
+      : (clienteDialog.mode === 'edit' ? { usuario_id: null } : null)
+
+    if (!nombre) {
+      setClienteDialog((prev) => ({
+        ...prev,
+        loading: false,
+        error: 'Nombre es requerido',
+      }))
+      return
+    }
+    const codigo = clienteDialog.mode === 'edit'
+      ? (clienteDialog.codigo || '').trim()
+      : buildCodigoCliente({ nombre, departamento })
+
+    if (clienteDialog.mode === 'edit' && !codigo) {
+      setClienteDialog((prev) => ({
+        ...prev,
+        loading: false,
+        error: 'Código es requerido',
+      }))
+      return
+    }
+    if (saldo !== null && !Number.isFinite(saldo)) {
+      setClienteDialog((prev) => ({
+        ...prev,
+        loading: false,
+        error: 'Saldo debe ser un número válido',
+      }))
+      return
+    }
+
+    try {
+      const url = clienteDialog.mode === 'edit'
+        ? `${API_BASE_URL}/clientes/${clienteDialog.id}`
+        : `${API_BASE_URL}/clientes`
+      const method = clienteDialog.mode === 'edit' ? 'PUT' : 'POST'
+      const payload = {
+        ...(clienteDialog.mode === 'edit' ? { codigo } : { codigo }),
+        nombre,
+        telefono,
+        direccion,
+        clasificacion_precio,
+        activo: !!clienteDialog.activo,
+        ...(saldo !== null ? { saldo } : null),
+        ...(usuarioPayload || null),
+      }
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      if (!res.ok) {
+        const txt = await res.text()
+        let msg = 'No se pudo guardar el cliente'
+        try {
+          const parsed = JSON.parse(txt)
+          msg = parsed.error || msg
+        } catch (_) {
+          // noop
+        }
+        setClienteDialog((prev) => ({ ...prev, loading: false, error: msg }))
+        return
+      }
+
+      const data = await res.json()
+      if (clienteDialog.mode === 'edit') {
+        setClientesRaw((prev) => prev.map((cli) => (cli.id === data.id ? data : cli)))
+        setClienteSel((prev) => (prev?.id === data.id ? { ...prev, ...data } : prev))
+      } else {
+        const nuevoCliente = {
+          ...data,
+          ordenes: [],
+          total: 0,
+          ultima: data.creado_en || new Date().toISOString(),
+        }
+        setClientesRaw((prev) => [...prev, nuevoCliente])
+        setClienteSel(nuevoCliente)
+      }
+      handleCloseClienteDialog()
+    } catch (err) {
+      console.error('Error creando cliente:', err)
+      setClienteDialog((prev) => ({
+        ...prev,
+        loading: false,
+        error: 'Error de red al guardar el cliente',
+      }))
+    }
+  }
+
+  return (
+    <Box sx={{ maxWidth: 1200, mx: 'auto', mt: 3 }}>
+      <Typography variant="h5" sx={{ mb: 2, fontWeight: 600 }}>
+        Clientes
+      </Typography>
+
+      {/* Filtros / búsqueda */}
+      <Paper sx={{ p: 2, borderRadius: 3, mb: 2 }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
+          <TextField
+            label="Buscar cliente (nombre, teléfono o código)"
+            size="small"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            fullWidth
+          />
+          {isMaestro && (
+            <TextField
+              select
+              label="Usuario"
+              size="small"
+              value={usuarioFiltro}
+              onChange={(e) => setUsuarioFiltro(e.target.value)}
+              sx={{ minWidth: 160 }}
+            >
+              <MenuItem value="todos">Todos</MenuItem>
+              {usuarios.map((usuario) => {
+                const label =
+                  usuario?.usuario ||
+                  usuario?.username ||
+                  usuario?.nombre ||
+                  `Usuario #${usuario?.id ?? ''}`.trim()
+                return (
+                  <MenuItem key={usuario.id} value={usuario.id}>
+                    {label}
+                  </MenuItem>
+                )
+              })}
+            </TextField>
+          )}
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Chip label={`Clientes: ${clientes.length}`} />
+            {hasAnyPermiso(['ClientesFinanzas', 'Maestro']) && (
+              <Button
+                variant="contained"
+                startIcon={<PersonAddAltIcon />}
+                onClick={handleOpenClienteDialog}
+              >
+                Nuevo cliente
+              </Button>
+            )}
+          </Stack>
+        </Stack>
+      </Paper>
+
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+        {/* -------- Tabla de clientes -------- */}
+        <Box sx={{ flex: 1 }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 0.5 }}
+          >
+            <InfoOutlinedIcon fontSize="small" color="action" />
+            Toca un cliente para ver su detalle y sus abonos.
+          </Typography>
+        <TableContainer component={Paper} sx={{ borderRadius: 3 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Cliente</TableCell>
+                <TableCell>Teléfono</TableCell>
+                <TableCell align="right">
+                  <Tooltip title="Cantidad de envíos pendientes de pago de este cliente">
+                    <span>Envíos</span>
+                  </Tooltip>
+                </TableCell>
+                <TableCell align="right">Total</TableCell>
+                <TableCell>Última compra</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {clientesPagina.map(c => {
+                const tieneVencidas = (c.ordenes || []).some((orden) => {
+                  const diasCredito = getDiasCreditoForOrden(orden)
+                  if (!diasCredito || diasCredito <= 0) return false
+                  const fechaEnvio = orden?.fecha_envio || orden?.fecha
+                  const diasTranscurridos = fechaEnvio
+                    ? dayjs().diff(dayjs(fechaEnvio), 'day')
+                    : 0
+                  const diasRestantes = diasCredito - diasTranscurridos
+                  return diasRestantes <= 0
+                })
+                const rowBg = tieneVencidas ? 'error.light' : undefined
+                const rowColor = tieneVencidas ? 'error.main' : undefined
+                return (
+                <Tooltip
+                  key={c.id}
+                  title="Toca para ver el detalle y los abonos de este cliente"
+                  followCursor
+                  enterDelay={600}
+                >
+                <TableRow
+                  hover
+                  sx={{
+                    cursor: 'pointer',
+                    backgroundColor: rowBg,
+                    color: rowColor,
+                    '&:hover': { backgroundColor: rowBg },
+                    ...(rowColor
+                      ? {
+                          '& td:first-of-type': {
+                            borderLeft: 4,
+                            borderColor: rowColor,
+                            paddingLeft: 12,
+                          },
+                        }
+                      : null),
+                  }}
+                  onClick={() => setClienteSel(c)}
+                  selected={clienteSel?.id === c.id}
+                >
+                  <TableCell>{c.nombre}</TableCell>
+                  <TableCell>{c.telefono}</TableCell>
+                  <TableCell align="right">{c.ordenes.length}</TableCell>
+                  <TableCell align="right">{formatQuetzales(c.total || 0)}</TableCell>
+                  <TableCell>{c.ultima ? formatFecha(c.ultima) : '—'}</TableCell>
+                </TableRow>
+                </Tooltip>
+                )
+              })}
+              {cargandoClientes && clientes.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Stack alignItems="center" spacing={1} sx={{ py: 3 }}>
+                      <CircularProgress size={28} />
+                      <Typography align="center" color="text.secondary">
+                        Cargando clientes…
+                      </Typography>
+                    </Stack>
+                  </TableCell>
+                </TableRow>
+              )}
+              {!cargandoClientes && clientes.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Typography align="center" color="text.secondary">
+                      No hay clientes que coincidan
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+          <PaginacionTabla {...paginacionClientes} />
+        </TableContainer>
+        </Box>
+
+        {/* -------- Detalle: órdenes del cliente seleccionado -------- */}
+        <TableContainer
+          component={Paper}
+          sx={{ borderRadius: 3, flex: 1, minWidth: 420 }}
+        >
+          <Box sx={{ p: 2, pb: 0 }}>
+            {clienteSel && (
+              <Box
+                sx={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 1,
+                  justifyContent: 'flex-end',
+                  mb: 1.5,
+                  '& > button': {
+                    textTransform: 'none',
+                    fontWeight: 500,
+                    borderRadius: 2,
+                  },
+                }}
+              >
+                {hasAnyPermiso(['Clientes', 'Maestro', 'ClientesFinanzas']) && (
+                  <Tooltip title="Registrar uno o más pagos recibidos para este cliente">
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="primary"
+                      startIcon={<AddCircleIcon />}
+                      onClick={() => handleOpenAbono(clienteSel)}
+                    >
+                      Agregar abono
+                    </Button>
+                  </Tooltip>
+                )}
+                {hasAnyPermiso(['Maestro']) && (
+                  <Tooltip title="Reaplica todos los abonos del cliente a sus órdenes según su urgencia">
+                    <span>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        startIcon={<AutorenewIcon />}
+                        onClick={handleRecalcularCartera}
+                        disabled={recalculandoCartera}
+                      >
+                        {recalculandoCartera ? 'Recalculando…' : 'Recalcular cartera'}
+                      </Button>
+                    </span>
+                  </Tooltip>
+                )}
+                {hasAnyPermiso(['Maestro']) && (
+                  <Tooltip title="Modificar los datos de este cliente">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="inherit"
+                      startIcon={<EditIcon />}
+                      onClick={() => handleOpenEditCliente(clienteSel)}
+                    >
+                      Editar cliente
+                    </Button>
+                  </Tooltip>
+                )}
+              </Box>
+            )}
+
+            <Box>
+              <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                {clienteSel ? `Órdenes de ${clienteSel.nombre}` : 'Selecciona un cliente'}
+              </Typography>
+              {clienteSel && (
+                <Typography variant="body2" color="text.secondary">
+                  {clienteSel.telefono} — Total gastado: {formatQuetzales(clienteSel.total)}
+                </Typography>
+              )}
+              {clienteSel && (
+                <Typography variant="body2" color="text.secondary">
+                  {clienteSel.direccion ? `Dirección: ${clienteSel.direccion}` : 'Dirección: —'}
+                </Typography>
+              )}
+              {clienteSel && (
+                <Typography variant="body2" color="text.secondary">
+                  {clienteSel.codigo ? `Código: ${clienteSel.codigo}` : 'Código: —'}
+                </Typography>
+              )}
+              {clienteSel && (
+                <Typography variant="body2" color="text.secondary">
+                  {clienteSel.clasificacion_precio
+                    ? `Clasificación: ${CLASIFICACION_LABEL[String(clienteSel.clasificacion_precio).toLowerCase()] || clienteSel.clasificacion_precio}`
+                    : 'Clasificación: —'}
+                </Typography>
+              )}
+            </Box>
+          </Box>
+
+          {clienteSel && (
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mt: 1.5, px: 2 }}>
+              <Box
+                sx={{
+                  flex: 1,
+                  p: 1.5,
+                  bgcolor: 'error.light',
+                  border: 1,
+                  borderColor: 'error.main',
+                  borderRadius: 1,
+                }}
+              >
+                <Typography variant="caption" color="text.secondary">Saldo pendiente</Typography>
+                <Typography variant="subtitle1" sx={{ fontWeight: 700, color: 'error.main' }}>
+                  {formatQuetzales(saldoCliente)}
+                </Typography>
+              </Box>
+              {/* <Box
+                sx={{
+                  flex: 1,
+                  p: 1.5,
+                  bgcolor: '#e8f5e9',
+                  border: '1px solid #81c784',
+                  borderRadius: 1,
+                }}
+              >
+                <Typography variant="caption" color="text.secondary">Abonos</Typography>
+                <Typography variant="subtitle1" sx={{ fontWeight: 700, color: '#2e7d32' }}>
+                  Q {abonosCliente.toFixed(2)}
+                </Typography>
+              </Box> */}
+            </Stack>
+          )}
+
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Fecha</TableCell>
+                <TableCell>No. de envío</TableCell>
+                <TableCell align="right">
+                  <Tooltip title="Días que faltan para que venza el crédito. En rojo si ya está vencido.">
+                    <span>Días de crédito</span>
+                  </Tooltip>
+                </TableCell>
+                <TableCell align="right">Total</TableCell>
+                <TableCell align="right">
+                  <Tooltip title="Monto que aún falta por pagar de este envío">
+                    <span>Restante</span>
+                  </Tooltip>
+                </TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {ordenesCliente.map(o => (
+                (() => {
+                  const fechaOrden = o.fecha_envio || o.fecha
+                  const diasTranscurridos = fechaOrden
+                    ? dayjs().diff(dayjs(fechaOrden), 'day')
+                    : 0
+                  const diasCredito = getDiasCreditoForOrden(o)
+                  const diasRestantes = diasCredito - diasTranscurridos
+                  const rowColor = diasRestantes <= 0 ? 'error.main' : 'success.main'
+                  const rowBg = diasRestantes <= 0 ? 'error.light' : 'success.light'
+                  return (
+                <TableRow
+                  key={o.id}
+                  hover
+                  sx={{
+                    cursor: 'pointer',
+                    color: rowColor,
+                    backgroundColor: rowBg,
+                    '&:hover': { backgroundColor: rowBg },
+                  }}
+                  onClick={() => setOrdenSel(o)}
+                >
+                  <TableCell>{formatFecha(o.fecha)}</TableCell>
+                  <TableCell>{o.codigo_orden || o.codigo || o.id}</TableCell>
+                  <TableCell align="right">
+                    {diasRestantes} días
+                  </TableCell>
+                  <TableCell align="right">{formatQuetzales(calcTotal(o.items))}</TableCell>
+                  <TableCell align="right">{formatQuetzales(o.saldo ?? 0)}</TableCell>
+                </TableRow>
+                  )
+                })()
+              ))}
+              {clienteSel && cargandoOrdenes && ordenesCliente.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Stack alignItems="center" spacing={1} sx={{ py: 3 }}>
+                      <CircularProgress size={28} />
+                      <Typography align="center" color="text.secondary">
+                        Cargando órdenes…
+                      </Typography>
+                    </Stack>
+                  </TableCell>
+                </TableRow>
+              )}
+              {clienteSel && !cargandoOrdenes && ordenesCliente.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <Typography align="center" color="text.secondary">
+                      Este cliente no tiene órdenes
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+    </Stack>
+
+      {/* -------- Dialog Abonos -------- */}
+      <Dialog open={abonoDialog.open} onClose={handleCerrarAbono} maxWidth="md" fullWidth>
+        <DialogTitle>
+          Asignar abonos {abonoDialog.cliente ? `a ${abonoDialog.cliente.nombre}` : ''}
+        </DialogTitle>
+        <DialogContent dividers>
+          {abonoDialog.error && (
+            <Typography color="error" sx={{ mb: 2 }}>
+              {abonoDialog.error}
+            </Typography>
+          )}
+          {pagosPendientesCliente.length === 0 && (
+            <Typography color="text.secondary">
+              No hay pagos pendientes de asignar para este cliente.
+            </Typography>
+          )}
+          {pagosPendientesCliente.length > 0 && (
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell width="50" />
+                  <TableCell>Fecha</TableCell>
+                  <TableCell>Referencia</TableCell>
+                  <TableCell align="right">Cantidad</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {pagosPendientesCliente.map((pago) => (
+                  <TableRow key={pago.id}>
+                    <TableCell>
+                      <Checkbox
+                        checked={abonoDialog.selected.has(pago.id)}
+                        onChange={() => togglePagoSeleccion(pago.id)}
+                      />
+                    </TableCell>
+                    <TableCell>{(pago.fecha || pago.created_at) ? formatFecha(pago.fecha || pago.created_at) : '—'}</TableCell>
+                    <TableCell>{pago.referencia || pago.ref || '—'}</TableCell>
+                    <TableCell align="right">{formatQuetzales(pago.cantidad || 0)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+          {pagosPendientesCliente.length > 0 && (
+            <Box sx={{ mt: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Typography variant="body2" color="text.secondary">
+                Seleccionados: {abonoDialog.selected.size}
+              </Typography>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                Total a asignar: {formatQuetzales(totalSeleccionadoAbono)}
+              </Typography>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCerrarAbono}>Cancelar</Button>
+          <Button
+            variant="contained"
+            onClick={handleConfirmarAbono}
+            disabled={abonoDialog.selected.size === 0 || abonoDialog.loading}
+          >
+            {abonoDialog.loading ? 'Asignando...' : 'Confirmar abono'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* -------- Dialog Detalle de Orden -------- */}
+      <Dialog open={!!ordenSel} onClose={() => setOrdenSel(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Orden {ordenSel?.codigo_orden || ordenSel?.id}</DialogTitle>
+        <DialogContent dividers>
+          {(() => {
+            const clienteOrden = ordenSel?.cliente ?? clientesById[ordenSel?.cliente_id]
+            return (
+              <Stack spacing={1} sx={{ mb: 2 }}>
+                <Typography variant="body2" color="text.secondary">
+                  Fecha:{' '}
+                  {ordenSel ? formatFecha(ordenSel.fecha) : '—'}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Cliente: {clienteOrden?.nombre || '—'} — {clienteOrden?.telefono || '—'}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Dirección: {clienteOrden?.direccion || '—'}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Código: {clienteOrden?.codigo || '—'}
+                </Typography>
+              </Stack>
+            )
+          })()}
+
+          <Divider sx={{ mb: 2 }} />
+
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Producto / Servicio</TableCell>
+                <TableCell>
+                  <Tooltip title="SKU: código que identifica al producto">
+                    <span>SKU</span>
+                  </Tooltip>
+                </TableCell>
+                <TableCell align="right">Precio</TableCell>
+                <TableCell align="right">Cant.</TableCell>
+                <TableCell align="right">Subtotal</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {ordenSel?.items?.map((it) => {
+                const productoInfo = it.producto ?? productosById[it.producto_id]
+                  let nombre = ''
+                  if (it.tipo === 'servicio') {
+                    nombre =
+                      it.servicio?.descripcion ||
+                      it.nombre ||
+                      `Servicio #${it.servicio_id ?? it.id}`
+                  } else { // asumimos 'producto'
+                    nombre =
+                      productoInfo?.nombre ||
+                      productoInfo?.descripcion ||
+                      it.nombre ||
+                      `Producto #${it.producto_id ?? it.id}`
+                  }
+
+                const sku = productoInfo?.codigo || it.codigo || ''
+
+                const precio = it.precio ?? it.price ?? it.precio_unitario ?? 0
+                const qty = it.cantidad ?? it.qty ?? 1
+                const subtotal = precio * qty
+
+                return (
+                  <TableRow key={it.id}>
+                    <TableCell>{nombre}</TableCell>
+                    <TableCell>{sku}</TableCell>
+                    <TableCell align="right">{formatQuetzales(precio)}</TableCell>
+                    <TableCell align="right">{qty}</TableCell>
+                    <TableCell align="right">{formatQuetzales(subtotal)}</TableCell>
+                  </TableRow>
+                )
+              })}
+              <TableRow>
+                <TableCell colSpan={4} align="right" sx={{ fontWeight: 600 }}>
+                  Total
+                </TableCell>
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                  {formatQuetzales(ordenSel ? calcTotal(ordenSel.items) : 0)}
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOrdenSel(null)}>Cerrar</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* -------- Dialog Cliente -------- */}
+      <Dialog open={clienteDialog.open} onClose={handleCloseClienteDialog} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {clienteDialog.mode === 'edit' ? 'Editar cliente' : 'Nuevo cliente'}
+        </DialogTitle>
+        <form onSubmit={handleCrearCliente}>
+          <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {clienteDialog.mode === 'edit' && (
+              <TextField
+                label="Código"
+                value={clienteDialog.codigo}
+                onChange={(e) => setClienteDialog((prev) => ({ ...prev, codigo: e.target.value }))}
+                required
+              />
+            )}
+            <TextField
+              label="Nombre"
+              value={clienteDialog.nombre}
+              onChange={(e) => setClienteDialog((prev) => ({ ...prev, nombre: e.target.value }))}
+              required
+            />
+            <TextField
+              label="Teléfono"
+              value={clienteDialog.telefono}
+              onChange={(e) => setClienteDialog((prev) => ({ ...prev, telefono: e.target.value }))}
+            />
+            <TextField
+              select
+              label="Usuario asignado"
+              value={clienteDialog.usuario_id}
+              onChange={(e) =>
+                setClienteDialog((prev) => ({ ...prev, usuario_id: e.target.value }))
+              }
+            >
+              <MenuItem value="">Sin asignar</MenuItem>
+              {usuarios.map((usuario) => {
+                const label =
+                  usuario?.usuario ||
+                  usuario?.username ||
+                  usuario?.nombre ||
+                  `Usuario #${usuario?.id ?? ''}`.trim()
+                return (
+                  <MenuItem key={usuario.id} value={usuario.id}>
+                    {label}
+                  </MenuItem>
+                )
+              })}
+            </TextField>
+            <TextField
+              select
+              label="Departamento"
+              value={clienteDialog.departamento}
+              onChange={(e) =>
+                setClienteDialog((prev) => ({ ...prev, departamento: e.target.value }))
+              }
+              placeholder="Selecciona departamento"
+            >
+              {DEPARTAMENTOS_GUATEMALA.map((depto) => (
+                <MenuItem key={depto} value={depto}>
+                  {depto}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="Dirección"
+              value={clienteDialog.direccion}
+              onChange={(e) => setClienteDialog((prev) => ({ ...prev, direccion: e.target.value }))}
+              multiline
+              minRows={2}
+            />
+            <TextField
+              select
+              label="Clasificación de precio"
+              value={clienteDialog.clasificacion}
+              onChange={(e) =>
+                setClienteDialog((prev) => ({ ...prev, clasificacion: e.target.value }))
+              }
+              helperText="CF = Consumidor Final. Define la lista de precios que se aplica al cliente."
+            >
+              <MenuItem value="cf">CF (Consumidor Final)</MenuItem>
+              <MenuItem value="minorista">Minorista</MenuItem>
+              <MenuItem value="mayorista">Mayorista</MenuItem>
+            </TextField>
+            <TextField
+              label="Saldo (Q)"
+              type="number"
+              value={clienteDialog.saldo}
+              onChange={(e) => setClienteDialog((prev) => ({ ...prev, saldo: e.target.value }))}
+              inputProps={{ step: '0.01', min: '0' }}
+              InputProps={{
+                startAdornment: <InputAdornment position="start">Q</InputAdornment>,
+              }}
+              helperText="Saldo pendiente del cliente, en quetzales."
+            />
+            <TextField
+              select
+              label="Activo"
+              value={clienteDialog.activo ? 'si' : 'no'}
+              onChange={(e) =>
+                setClienteDialog((prev) => ({ ...prev, activo: e.target.value === 'si' }))
+              }
+            >
+              <MenuItem value="si">Si</MenuItem>
+              <MenuItem value="no">No</MenuItem>
+            </TextField>
+            {clienteDialog.error && (
+              <Typography variant="body2" color="error">
+                {clienteDialog.error}
+              </Typography>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleCloseClienteDialog} disabled={clienteDialog.loading}>
+              Cancelar
+            </Button>
+            <Button
+              variant="contained"
+              type="submit"
+              startIcon={clienteDialog.mode === 'edit' ? <EditIcon /> : <PersonAddAltIcon />}
+              disabled={clienteDialog.loading}
+            >
+              Guardar
+            </Button>
+          </DialogActions>
+        </form>
+      </Dialog>
+
+      {/* -------- Aviso no bloqueante (Snackbar) -------- */}
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={6000}
+        onClose={cerrarAviso}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          onClose={cerrarAviso}
+          severity={snack.severity}
+          variant="filled"
+          sx={{ width: '100%' }}
+        >
+          {snack.message}
+        </Alert>
+      </Snackbar>
+    </Box>
+  )
+}
